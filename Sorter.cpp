@@ -1,10 +1,8 @@
 #include "Sorter.h"
 
-Sorter::Sorter(string const& inputFilename, string const& blocksFolder, int arcPerBlock)
-: blocksFolder(blocksFolder)
+Sorter::Sorter(string const& inputFilename, string const& runtimeFolder, int arcPerBlock)
+: runtimeFolder(runtimeFolder)
 {
-    filesystem::remove_all(blocksFolder);
-    filesystem::create_directory(blocksFolder);
     ifstream input(inputFilename);
 
     vector<pair<nodeId_t, nodeId_t>> block;
@@ -25,7 +23,7 @@ Sorter::Sorter(string const& inputFilename, string const& blocksFolder, int arcP
             {
                 sort(block.begin(), block.end());
                 ofstream blockFile;
-                blockFile.open(format("{}\\{}.txt", blocksFolder, blockNum));
+                blockFile.open(runtimeFolder + string("/block_") + to_string(blockNum) + string(".txt"));
                 for(auto const& i : block)
                 {
                     blockFile << i.second << "\t" << i.first << endl;
@@ -39,13 +37,26 @@ Sorter::Sorter(string const& inputFilename, string const& blocksFolder, int arcP
         }
     }
 
+    sort(block.begin(), block.end());
+    ofstream blockFile;
+    blockFile.open(runtimeFolder + string("/block_") + to_string(blockNum) + string(".txt"));
+    for(auto const& i : block)
+    {
+        blockFile << i.second << "\t" << i.first << endl;
+    }
+    blockFile.close();
+
+    block.clear();
+    arcInBlock = 0;
+    blockNum++;
+
     blocksCount = blockNum;
     blockStreams.resize(blocksCount);
     front.resize(blocksCount);
     frontAvailable.resize(blocksCount);
     for(int i = 0; i < blocksCount; i++)
     {
-        blockStreams[i] = ifstream(format("{}\\{}.txt", blocksFolder, i));
+        blockStreams[i] = ifstream(runtimeFolder + string("/block_") + to_string(i) + string(".txt"));
         readLineOfStream(i);
     }
 }
