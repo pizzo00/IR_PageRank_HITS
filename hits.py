@@ -35,6 +35,8 @@ print("number of nodes in graph L:", no_nodes)
 # create two vertical vectors no_nodes x 1, where each element is equal to 1.
 a = numpy.matrix( [ [1.]  for i in range(no_nodes) ] )
 h = numpy.matrix( [ [1.]  for i in range(no_nodes) ] )
+a = a / numpy.sum(a)
+h = h / numpy.sum(h)
 
 
 for i in range(50):
@@ -49,6 +51,10 @@ for i in range(50):
     # If the error/distance is very small, terminate the process
     error1 =  numpy.sqrt(numpy.sum(numpy.square((a-a_new))))
     error2 =  numpy.sqrt(numpy.sum(numpy.square((h-h_new))))
+
+    print("ERROR")
+    print(error1)
+    print(error2)
 
     a = a_new
     h = h_new
