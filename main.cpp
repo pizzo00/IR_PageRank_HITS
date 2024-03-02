@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <queue>
+#include <set>
 #include <filesystem>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -98,37 +100,88 @@ double error(nodeId_t nNodes, double const *a, double const *newA, double const&
     return sqrt(out);
 }
 
-int main() {
-    filesystem::remove_all(runtimeFolder);
-    filesystem::create_directory(runtimeFolder);
+template <typename T, typename T2>
+set<T> getSetOfFirst(vector<pair<T, T2>> const& in)
+{
+    set<T> out;
+    for(auto const& i : in)
+        out.insert(i.first);
+    return out;
+}
 
-    Sorter s("/home/pizzolato/IR_Project/data/web-NotreDame.txt", runtimeFolder, arcPerBlock);
+template <typename T>
+double jaccardIndex(set<T> const& s1, set<T> const& s2)
+{
+    double s1Size = s1.size();
+    double s2Size = s2.size();
 
-    cout << "Begin writing" << endl;
+    // Get the intersection set
+    set<T> intersection;
+    set_intersection(s1.begin(), s1.end(), s2.begin(), s2.end(), inserter(intersection, intersection.begin()));
+
+    double intersectionSize = intersection.size();
+
+    return intersectionSize / (s1Size + s2Size - intersectionSize);
+}
+
+    vector<pair<nodeId_t, double>> getVectorTopK(nodeId_t nNodes, int k, double const *a, double const& aDivider = 1.0)
+{
+    priority_queue<pair<double, nodeId_t>, vector<pair<double, nodeId_t>>, greater<>> pq; //Min-heap
+    for (nodeId_t r = 0; r < nNodes; r++) {
+        pq.emplace(a[r], r);  //add to min-heap
+
+        if (pq.size() > k)
+            pq.pop();   //remove the top element (smallest) once the queue reaches the size K
+    }
+
+    vector<pair<nodeId_t, double>> out;
+    for (int i = 0; i < k; i++) {
+        out.emplace_back(pq.top().second, pq.top().first / aDivider);
+        pq.pop();
+    }
+    sort(out.begin(), out.end(), [](pair<nodeId_t, double> const& l, pair<nodeId_t, double> const& r) {
+        return make_pair(l.second, l.first) > make_pair(r.second, r.first);
+    });
+
+    return out;
+}
+
+vector<pair<nodeId_t, nodeId_t>> inDegree(int k, nodeId_t nNodes, ull *mtRowMap)
+{
+//    cout << "In Degree" << endl;
+    //<qty, id>
+    priority_queue<pair<nodeId_t, nodeId_t>, vector<pair<nodeId_t, nodeId_t>>, greater<>> pq; //Min-heap
+    pq.emplace(mtRowMap[0], 0);  //add to min-heap
+    for (nodeId_t r = 1; r < nNodes; r++)
+    {
+        pq.emplace(mtRowMap[r] - mtRowMap[r-1], r);  //add to min-heap
+
+        if (pq.size() > k)
+            pq.pop();   //remove the top element (smallest) once the queue reaches the size K
+    }
+
+    //<id, qty>
+    vector<pair<nodeId_t, nodeId_t>> out;
+    for (int i = 0; i < k; i++) {
+        out.emplace_back(pq.top().second, pq.top().first);
+        pq.pop();
+    }
+    sort(out.begin(), out.end(), [](pair<nodeId_t, double> const& l, pair<nodeId_t, double> const& r) {
+        return make_pair(l.second, l.first) > make_pair(r.second, r.first);
+    });
+
+    return out;
+}
+
+pair<vector<pair<nodeId_t, double>>, vector<pair<nodeId_t, double>>> hits(int k, nodeId_t nNodes, ull *mRowMap, nodeId_t *mColMap, ull *mtRowMap, nodeId_t *mtColMap)
+{
     string aFilename = runtimeFolder + string("/a_0.txt");
     string hFilename = runtimeFolder + string("/h_0.txt");
-    string mColFilename = runtimeFolder + string("/mCol.txt");
-    string mRowFilename = runtimeFolder + string("/mRow.txt");
-    string mtColFilename = runtimeFolder + string("/mtCol.txt");
-    string mtRowFilename = runtimeFolder + string("/mtRow.txt");
-    cout << "    Matrix" << endl;
-    nodeId_t nNodes = writeMatrixFiles(s, false, mColFilename, mRowFilename);
-    cout << "    Transposed Matrix" << endl;
-    writeMatrixFiles(s, true, mtColFilename, mtRowFilename);
-    cout << "    A" << endl;
+
+//    cout << " - A" << endl;
     writeVector(aFilename, nNodes, (double)1.0);
-    cout << "    H" << endl;
+//    cout << " - H" << endl;
     writeVector(hFilename, nNodes, (double)1.0);
-
-    int mRowFile = open(mRowFilename.c_str(), O_RDONLY);
-    int mColFile = open(mColFilename.c_str(), O_RDONLY);
-    int mtRowFile = open(mtRowFilename.c_str(), O_RDONLY);
-    int mtColFile = open(mtColFilename.c_str(), O_RDONLY);
-    ull *mRowMap = (ull *) mmap(nullptr, nNodes*sizeof(ull), PROT_READ, MAP_SHARED, mRowFile, 0);
-    nodeId_t *mColMap = (nodeId_t *) mmap(nullptr, mRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mColFile, 0);
-    ull *mtRowMap = (ull *) mmap(nullptr, nNodes*sizeof(ull), PROT_READ, MAP_SHARED, mtRowFile, 0);
-    nodeId_t *mtColMap = (nodeId_t *) mmap(nullptr, mtRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mtColFile, 0);
-
 
     double errA = 1000;
     double errH = 1000;
@@ -147,7 +200,7 @@ int main() {
         string newAFilename = runtimeFolder + string("/a_") + to_string(step) + string(".txt");
         string newHFilename = runtimeFolder + string("/h_") + to_string(step) + string(".txt");
 
-        cout << "Begin computation" << endl;
+//        cout << "Begin computation " << step << endl;
         newASum = multiply(newAFilename, nNodes, mtRowMap, mtColMap, nullptr, hMap, hSum);
         newHSum = multiply(newHFilename, nNodes, mRowMap, mColMap, nullptr, aMap, aSum);
 
@@ -170,31 +223,72 @@ int main() {
         aSum = newASum;
         hSum = newHSum;
 
-        cout << "error A: " << errA << endl;
-        cout << "error H: " << errH << endl;
+//        cout << "error A: " << errA << endl;
+//        cout << "error H: " << errH << endl;
 
         close(newAFile);
     }
 
+    auto topA = getVectorTopK(nNodes, k, aMap, aSum);
+    auto topH = getVectorTopK(nNodes, k, hMap, hSum);
+
     close(aFile);
     close(hFile);
+
+    return {topA, topH};
+}
+
+int main() {
+    filesystem::remove_all(runtimeFolder);
+    filesystem::create_directory(runtimeFolder);
+
+    Sorter s("/home/pizzolato/IR_Project/data/web-NotreDame.txt", runtimeFolder, arcPerBlock);
+
+    cout << "Begin writing" << endl;
+    string mColFilename = runtimeFolder + string("/mCol.txt");
+    string mRowFilename = runtimeFolder + string("/mRow.txt");
+    string mtColFilename = runtimeFolder + string("/mtCol.txt");
+    string mtRowFilename = runtimeFolder + string("/mtRow.txt");
+    cout << " - Matrix" << endl;
+    nodeId_t nNodes = writeMatrixFiles(s, false, mColFilename, mRowFilename);
+    cout << " - Transposed Matrix" << endl;
+    writeMatrixFiles(s, true, mtColFilename, mtRowFilename);
+
+
+    int mRowFile = open(mRowFilename.c_str(), O_RDONLY);
+    int mColFile = open(mColFilename.c_str(), O_RDONLY);
+    int mtRowFile = open(mtRowFilename.c_str(), O_RDONLY);
+    int mtColFile = open(mtColFilename.c_str(), O_RDONLY);
+    ull *mRowMap = (ull *) mmap(nullptr, nNodes*sizeof(ull), PROT_READ, MAP_SHARED, mRowFile, 0);
+    nodeId_t *mColMap = (nodeId_t *) mmap(nullptr, mRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mColFile, 0);
+    ull *mtRowMap = (ull *) mmap(nullptr, nNodes*sizeof(ull), PROT_READ, MAP_SHARED, mtRowFile, 0);
+    nodeId_t *mtColMap = (nodeId_t *) mmap(nullptr, mtRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mtColFile, 0);
+
+    for(int k = 10; k <= 100; k+=10) {
+        auto hitsRes = hits(k, nNodes, mRowMap, mColMap, mtRowMap, mtColMap);
+
+        auto topA = hitsRes.first;
+        auto topH = hitsRes.second;
+//    cout<< "Top A" << endl;
+//    for(auto i : topA)
+//        cout << i.first << " " << i.second << endl;
+//    cout<< "Top H" << endl;
+//    for(auto i : topH)
+//        cout << i.first << " " << i.second << endl;
+
+        auto inDegreeRes = inDegree(k, nNodes, mtRowMap);
+//    cout<< "Top" << endl;
+//    for(auto i : inDegreeRes)
+//        cout << i.first << " " << i.second << endl;
+
+        double jacc = jaccardIndex(getSetOfFirst(topA), getSetOfFirst(inDegreeRes));
+        cout << "Jaccard " << k << ": " << jacc << endl;
+    }
+
     close(mRowFile);
     close(mColFile);
     close(mtRowFile);
     close(mtColFile);
-
-
-
-//    if (atRowMap == MAP_FAILED || atColMap == MAP_FAILED)
-//    {
-//        perror("Error mmapping the files");
-//        exit(EXIT_FAILURE);
-//    }
-
-    for(int i = 0; i < 10; i++)
-    {
-//        cout << atColMap[i] << endl;
-    }
 
     return 0;
 }
