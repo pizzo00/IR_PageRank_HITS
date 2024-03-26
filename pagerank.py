@@ -74,6 +74,7 @@ for i in range(1, 101):
     error = numpy.sqrt(numpy.sum(numpy.square((p-p_new))))
 
     p = p_new
+    print(error)
     if error < 10**-10:
         print("early exit at iteration:", i)
         break

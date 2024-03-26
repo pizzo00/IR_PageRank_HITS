@@ -19,12 +19,23 @@
 
 using namespace std;
 
-nodeId_t writeMatrixFiles(Sorter &s, bool transposed, string const& colFilename, string const& rowFilename)
+nodeId_t writeMatrixFiles(
+        Sorter &s,
+        bool transposed,
+        string const& colFilename,
+        string const& rowFilename,
+        string const& danglingFilename
+        )
 {
-    std::fstream colFile, rowFile;
+    double one = 1;
+    double zero = 0;
+
+    std::fstream colFile, rowFile, valueFile, dangFile;
     colFile.open(colFilename, std::ios::app | std::ios::binary);
     rowFile.open(rowFilename, std::ios::app | std::ios::binary);
+    dangFile.open(danglingFilename, std::ios::app | std::ios::binary);
 
+    ull startColInd = 0;
     ull colInd = 0;
     nodeId_t maxId = 0;
     nodeId_t currentRow = 0;
@@ -35,21 +46,49 @@ nodeId_t writeMatrixFiles(Sorter &s, bool transposed, string const& colFilename,
         nodeId_t col = transposed? tmp.first : tmp.second;
         if(row != currentRow)
         {
-            for(nodeId_t i = currentRow; i < row; i++)
-                rowFile.write(reinterpret_cast<char*>(&colInd), sizeof(colInd));
+            for(int i = 0; i < (colInd - startColInd); i++)
+            {
+                double val = 1.0 / (double)(colInd - startColInd);
+                valueFile.write(reinterpret_cast<char *>(&val), sizeof(val));
+            }
+            startColInd = colInd;
+
+            if(!transposed)
+                dangFile.write(reinterpret_cast<char*>(&one), sizeof(one));
+            rowFile.write(reinterpret_cast<char*>(&colInd), sizeof(colInd));
+            for(nodeId_t i = currentRow + 1; i < row; i++)
+            {
+                if(!transposed)
+                    dangFile.write(reinterpret_cast<char*>(&zero), sizeof(zero));
+                rowFile.write(reinterpret_cast<char *>(&colInd), sizeof(colInd));
+            }
             currentRow = row;
         }
+
         maxId = max(maxId, col);
         colInd++;
         colFile.write(reinterpret_cast<char*>(&col), sizeof(col));
     }
 
+    for(int i = 0; i < (colInd - startColInd); i++)
+    {
+        double val = 1.0 / (double)(colInd - startColInd);
+        valueFile.write(reinterpret_cast<char *>(&val), sizeof(val));
+    }
+
     maxId = max(maxId, currentRow);
-    for(nodeId_t i = currentRow; i < maxId+1; i++)
+    if(!transposed)
+        dangFile.write(reinterpret_cast<char*>(&one), sizeof(one));
+    rowFile.write(reinterpret_cast<char*>(&colInd), sizeof(colInd));
+    for(nodeId_t i = currentRow + 1; i < maxId+1; i++)
+    {
+        if(!transposed)
+            dangFile.write(reinterpret_cast<char*>(&zero), sizeof(zero));//dangling
         rowFile.write(reinterpret_cast<char*>(&colInd), sizeof(colInd));
+    }
 
     rowFile.close();
-    return maxId+1;
+    return maxId+1; // Row count
 }
 
 template <typename T>
@@ -68,7 +107,7 @@ double multiply(
         string const& outFilename,
         nodeId_t nNodes,
         ull const *aRow, nodeId_t const *aCol, double const *aValues,
-        double const *b, double const& bDivider = 1.0)
+        double const *b, double const& bMultiplier = 1.0, double const& outputSum = 0)
 {
     std::fstream f;
     f.open(outFilename, std::ios::app | std::ios::binary);
@@ -80,8 +119,9 @@ double multiply(
         {
             nodeId_t col = aCol[cIdx];
             double colValue = aValues == nullptr ? 1 : aValues[cIdx];
-            res += colValue * (b[col] / bDivider);
+            res += colValue * b[col] * bMultiplier;
         }
+        res += outputSum;
         f.write(reinterpret_cast<char*>(&res), sizeof(res));
         outSum += res;
     }
@@ -96,6 +136,17 @@ double error(nodeId_t nNodes, double const *a, double const *newA, double const&
     for(nodeId_t r = 0; r < nNodes; r++)
     {
         out += pow((newA[r] / newADivider) - (a[r] / aDivider), 2);
+    }
+    return sqrt(out);
+}
+
+double sumIf(nodeId_t nNodes, double const *valArr, bool const *ifArr, double const& divider = 1.0)
+{
+    double out = 0;
+    for(nodeId_t r = 0; r < nNodes; r++)
+    {
+        if(ifArr[r])
+            out += valArr[r] / divider;
     }
     return sqrt(out);
 }
@@ -124,7 +175,7 @@ double jaccardIndex(set<T> const& s1, set<T> const& s2)
     return intersectionSize / (s1Size + s2Size - intersectionSize);
 }
 
-    vector<pair<nodeId_t, double>> getVectorTopK(nodeId_t nNodes, int k, double const *a, double const& aDivider = 1.0)
+vector<pair<nodeId_t, double>> getVectorTopK(nodeId_t nNodes, int k, double const *a, double const& aDivider = 1.0)
 {
     priority_queue<pair<double, nodeId_t>, vector<pair<double, nodeId_t>>, greater<>> pq; //Min-heap
     for (nodeId_t r = 0; r < nNodes; r++) {
@@ -178,9 +229,7 @@ pair<vector<pair<nodeId_t, double>>, vector<pair<nodeId_t, double>>> hits(int k,
     string aFilename = runtimeFolder + string("/a_0.txt");
     string hFilename = runtimeFolder + string("/h_0.txt");
 
-//    cout << " - A" << endl;
     writeVector(aFilename, nNodes, (double)1.0);
-//    cout << " - H" << endl;
     writeVector(hFilename, nNodes, (double)1.0);
 
     double errA = 1000;
@@ -201,8 +250,8 @@ pair<vector<pair<nodeId_t, double>>, vector<pair<nodeId_t, double>>> hits(int k,
         string newHFilename = runtimeFolder + string("/h_") + to_string(step) + string(".txt");
 
 //        cout << "Begin computation " << step << endl;
-        newASum = multiply(newAFilename, nNodes, mtRowMap, mtColMap, nullptr, hMap, hSum);
-        newHSum = multiply(newHFilename, nNodes, mRowMap, mColMap, nullptr, aMap, aSum);
+        newASum = multiply(newAFilename, nNodes, mtRowMap, mtColMap, nullptr, hMap, 1.0/hSum);
+        newHSum = multiply(newHFilename, nNodes, mRowMap, mColMap, nullptr, aMap, 1.0/aSum);
 
         int newAFile = open(newAFilename.c_str(), O_RDONLY);
         double *newAMap = (double *) mmap(nullptr, nNodes * sizeof(double), PROT_READ, MAP_SHARED, newAFile, 0);
@@ -238,6 +287,52 @@ pair<vector<pair<nodeId_t, double>>, vector<pair<nodeId_t, double>>> hits(int k,
     return {topA, topH};
 }
 
+vector<pair<nodeId_t, double>> pagerank(int k, double d, nodeId_t nNodes, ull *mtRowMap, nodeId_t *mtColMap, bool *mDanglingMap)
+{
+    double telep = (1-d)/nNodes;
+    string pFilename = runtimeFolder + string("/p_0.txt");
+
+    writeVector(pFilename, nNodes, (double)1.0/nNodes);
+
+    double err = 1000;
+    double pSum = 1.0;
+    double newPSum ;
+    ull step = 0;
+    int pFile = open(pFilename.c_str(), O_RDONLY);
+    double *pMap = (double *) mmap(nullptr, nNodes * sizeof(double), PROT_READ, MAP_SHARED, pFile, 0);
+    while (step < 50 && err > 1e-10)
+    {
+        step++;
+        string newPFilename = runtimeFolder + string("/p_") + to_string(step) + string(".txt");
+
+        double dangSum = sumIf(nNodes, pMap, mDanglingMap, nNodes);
+        cout << "Begin computation " << step << endl;
+        newPSum = multiply(newPFilename, nNodes, mtRowMap, mtColMap, nullptr, pMap, d/pSum, telep+dangSum);
+
+        int newPFile = open(newPFilename.c_str(), O_RDONLY);
+        double *newPMap = (double *) mmap(nullptr, nNodes * sizeof(double), PROT_READ, MAP_SHARED, newPFile, 0);
+        err = error(nNodes, pMap, newPMap);
+
+        //Close old file
+        close(pFile);
+
+        //Swap files
+        pFile = newPFile;
+        pMap = newPMap;
+        pSum = newPSum;
+
+        cout << "error: " << err << endl;
+
+        close(newPFile);
+    }
+
+    auto top = getVectorTopK(nNodes, k, pMap);
+
+    close(pFile);
+
+    return top;
+}
+
 int main() {
     filesystem::remove_all(runtimeFolder);
     filesystem::create_directory(runtimeFolder);
@@ -249,22 +344,26 @@ int main() {
     string mRowFilename = runtimeFolder + string("/mRow.txt");
     string mtColFilename = runtimeFolder + string("/mtCol.txt");
     string mtRowFilename = runtimeFolder + string("/mtRow.txt");
+    string mDanglingFilename = runtimeFolder + string("/mDanglings.txt");
     cout << " - Matrix" << endl;
-    nodeId_t nNodes = writeMatrixFiles(s, false, mColFilename, mRowFilename);
+    nodeId_t nNodes = writeMatrixFiles(s, false, mColFilename, mRowFilename, mDanglingFilename);
     cout << " - Transposed Matrix" << endl;
-    writeMatrixFiles(s, true, mtColFilename, mtRowFilename);
+    writeMatrixFiles(s, true, mtColFilename, mtRowFilename, mDanglingFilename);
 
 
-    int mRowFile = open(mRowFilename.c_str(), O_RDONLY);
     int mColFile = open(mColFilename.c_str(), O_RDONLY);
-    int mtRowFile = open(mtRowFilename.c_str(), O_RDONLY);
+    int mRowFile = open(mRowFilename.c_str(), O_RDONLY);
     int mtColFile = open(mtColFilename.c_str(), O_RDONLY);
+    int mtRowFile = open(mtRowFilename.c_str(), O_RDONLY);
+    int mDanglingFile = open(mDanglingFilename.c_str(), O_RDONLY);
     ull *mRowMap = (ull *) mmap(nullptr, nNodes*sizeof(ull), PROT_READ, MAP_SHARED, mRowFile, 0);
     nodeId_t *mColMap = (nodeId_t *) mmap(nullptr, mRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mColFile, 0);
     ull *mtRowMap = (ull *) mmap(nullptr, nNodes*sizeof(ull), PROT_READ, MAP_SHARED, mtRowFile, 0);
     nodeId_t *mtColMap = (nodeId_t *) mmap(nullptr, mtRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mtColFile, 0);
+    bool *mDanglingMap = (bool *) mmap(nullptr, nNodes*sizeof(bool), PROT_READ, MAP_SHARED, mDanglingFile, 0);
 
-    for(int k = 10; k <= 100; k+=10) {
+    for(int k = 100; k <= 100; k+=10) {
+        auto pagerankRes = pagerank(k, 0.85, nNodes, mtRowMap, mtColMap, mDanglingMap);
         auto hitsRes = hits(k, nNodes, mRowMap, mColMap, mtRowMap, mtColMap);
 
         auto topA = hitsRes.first;
@@ -281,8 +380,13 @@ int main() {
 //    for(auto i : inDegreeRes)
 //        cout << i.first << " " << i.second << endl;
 
-        double jacc = jaccardIndex(getSetOfFirst(topA), getSetOfFirst(inDegreeRes));
-        cout << "Jaccard " << k << ": " << jacc << endl;
+        double jaccPrHt = jaccardIndex(getSetOfFirst(pagerankRes), getSetOfFirst(topA));
+        double jaccPrIn = jaccardIndex(getSetOfFirst(pagerankRes), getSetOfFirst(inDegreeRes));
+        double jaccHtIn = jaccardIndex(getSetOfFirst(topA), getSetOfFirst(inDegreeRes));
+        cout << "------------" << endl;
+        cout << "Jaccard PrHt" << k << ": " << jaccPrHt << endl;
+        cout << "Jaccard PrIn" << k << ": " << jaccPrIn << endl;
+        cout << "Jaccard HtIn" << k << ": " << jaccHtIn << endl;
     }
 
     close(mRowFile);
