@@ -11,11 +11,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cmath>
+#include <thread>
+#include <future>
 #include "Sorter.h"
 
 #define ull unsigned long long
 #define runtimeFolder "/home/pizzolato/IR_Project/runtime"
 #define arcPerBlock 200000
+#define WORKERS 10
 
 using namespace std;
 
@@ -104,15 +107,14 @@ void writeVector(string const& filename, ull length, T value)
 }
 
 double multiply(
-        string const& outFilename,
-        nodeId_t nNodes,
+        double* outFile,
+        nodeId_t start,
+        nodeId_t end,
         ull const *aRow, nodeId_t const *aCol, double const *aValues,
         double const *b, double const& bMultiplier = 1.0, double const& outputSum = 0)
 {
-    std::fstream f;
-    f.open(outFilename, std::ios::app | std::ios::binary);
     double outSum = 0;
-    for(nodeId_t r = 0; r < nNodes; r++)
+    for(nodeId_t r = start; r < end; r++)
     {
         double res = 0;
         for(ull cIdx = aRow[r]; cIdx < aRow[r+1]; cIdx++)
@@ -122,11 +124,10 @@ double multiply(
             res += colValue * b[col] * bMultiplier;
         }
         res += outputSum;
-        f.write(reinterpret_cast<char*>(&res), sizeof(res));
+        outFile[r] = res;
         outSum += res;
     }
 
-    f.close();
     return outSum;
 }
 
@@ -152,11 +153,11 @@ double sumIf(nodeId_t nNodes, double const *valArr, bool const *ifArr, double co
 }
 
 template <typename T, typename T2>
-set<T> getSetOfFirst(vector<pair<T, T2>> const& in)
+set<T> getSetOfFirstK(int k, vector<pair<T, T2>> const& in)
 {
     set<T> out;
-    for(auto const& i : in)
-        out.insert(i.first);
+    for(int i = 0; i < k; i++)
+        out.insert(in[i].first);
     return out;
 }
 
@@ -249,14 +250,38 @@ pair<vector<pair<nodeId_t, double>>, vector<pair<nodeId_t, double>>> hits(int k,
         string newAFilename = runtimeFolder + string("/a_") + to_string(step) + string(".txt");
         string newHFilename = runtimeFolder + string("/h_") + to_string(step) + string(".txt");
 
-//        cout << "Begin computation " << step << endl;
-        newASum = multiply(newAFilename, nNodes, mtRowMap, mtColMap, nullptr, hMap, 1.0/hSum);
-        newHSum = multiply(newHFilename, nNodes, mRowMap, mColMap, nullptr, aMap, 1.0/aSum);
+        int newAFile = open(newAFilename.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0x0777);
+        int newHFile = open(newHFilename.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0x0777);
+        ftruncate(newAFile, nNodes * sizeof(double));
+        ftruncate(newHFile, nNodes * sizeof(double));
+        double *newAMap = (double *)mmap (nullptr, nNodes * sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED, newAFile, 0);
+        double *newHMap = (double *)mmap (nullptr, nNodes * sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED, newHFile, 0);
 
-        int newAFile = open(newAFilename.c_str(), O_RDONLY);
-        double *newAMap = (double *) mmap(nullptr, nNodes * sizeof(double), PROT_READ, MAP_SHARED, newAFile, 0);
-        int newHFile = open(newHFilename.c_str(), O_RDONLY);
-        double *newHMap = (double *) mmap(nullptr, nNodes * sizeof(double), PROT_READ, MAP_SHARED, newHFile, 0);
+
+//        cout << "Begin computation " << step << endl;
+        std::future<double> futures[WORKERS];
+        nodeId_t nodePerWorkers = nNodes / WORKERS;
+
+        for(int w = 0; w < WORKERS; w++) {
+            nodeId_t start = w * nodePerWorkers;
+            nodeId_t end = w == WORKERS-1 ? nNodes : (w+1) * nodePerWorkers;
+            futures[w] = std::async(launch::async, multiply, newAMap, start, end, mtRowMap, mtColMap, nullptr, hMap,
+                                    1.0 / hSum, 0);
+        }
+        newASum = 0;
+        for(int w = 0; w < WORKERS; w++)
+            newASum += futures[w].get();
+
+        for(int w = 0; w < WORKERS; w++) {
+            nodeId_t start = w * nodePerWorkers;
+            nodeId_t end = w == WORKERS-1 ? nNodes : (w+1) * nodePerWorkers;
+            futures[w] = std::async(launch::async, multiply, newHMap, start, end, mRowMap, mColMap, nullptr, aMap,
+                                    1.0 / aSum, 0);
+        }
+        newHSum = 0;
+        for(int w = 0; w < WORKERS; w++)
+            newHSum += futures[w].get();
+
         errA = error(nNodes, aMap, newAMap, aSum, newASum);
         errH = error(nNodes, hMap, newHMap, hSum, newHSum);
 
@@ -296,7 +321,7 @@ vector<pair<nodeId_t, double>> pagerank(int k, double d, nodeId_t nNodes, ull *m
 
     double err = 1000;
     double pSum = 1.0;
-    double newPSum ;
+    double newPSum;
     ull step = 0;
     int pFile = open(pFilename.c_str(), O_RDONLY);
     double *pMap = (double *) mmap(nullptr, nNodes * sizeof(double), PROT_READ, MAP_SHARED, pFile, 0);
@@ -305,12 +330,25 @@ vector<pair<nodeId_t, double>> pagerank(int k, double d, nodeId_t nNodes, ull *m
         step++;
         string newPFilename = runtimeFolder + string("/p_") + to_string(step) + string(".txt");
 
-        double dangSum = sumIf(nNodes, pMap, mDanglingMap, nNodes);
-        cout << "Begin computation " << step << endl;
-        newPSum = multiply(newPFilename, nNodes, mtRowMap, mtColMap, nullptr, pMap, d/pSum, telep+dangSum);
+        int newPFile = open(newPFilename.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0x0777);
+        ftruncate(newPFile, nNodes * sizeof(double));
+        double *newPMap = (double *)mmap (nullptr, nNodes * sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED, newPFile, 0);
 
-        int newPFile = open(newPFilename.c_str(), O_RDONLY);
-        double *newPMap = (double *) mmap(nullptr, nNodes * sizeof(double), PROT_READ, MAP_SHARED, newPFile, 0);
+        double dangSum = sumIf(nNodes, pMap, mDanglingMap, nNodes);
+//        cout << "Begin computation " << step << endl;
+
+        std::future<double> futures[WORKERS];
+        nodeId_t nodePerWorkers = nNodes / WORKERS;
+        for(int w = 0; w < WORKERS; w++) {
+            nodeId_t start = w * nodePerWorkers;
+            nodeId_t end = w == WORKERS-1 ? nNodes : (w+1) * nodePerWorkers;
+            futures[w] = std::async(launch::async, multiply, newPMap, start, end, mtRowMap, mtColMap, nullptr, pMap,
+                                    d / pSum, telep + dangSum);
+        }
+        newPSum = 0;
+        for(int w = 0; w < WORKERS; w++)
+            newPSum += futures[w].get();
+
         err = error(nNodes, pMap, newPMap);
 
         //Close old file
@@ -321,7 +359,7 @@ vector<pair<nodeId_t, double>> pagerank(int k, double d, nodeId_t nNodes, ull *m
         pMap = newPMap;
         pSum = newPSum;
 
-        cout << "error: " << err << endl;
+//        cout << "error: " << err << endl;
 
         close(newPFile);
     }
@@ -333,11 +371,22 @@ vector<pair<nodeId_t, double>> pagerank(int k, double d, nodeId_t nNodes, ull *m
     return top;
 }
 
-int main() {
+int main(int argc, char *argv[])
+{
+    if(argc != 3)
+    {
+        cout << "Require 2 params, the graph path and the k value" << endl;
+        return -1;
+    }
+
+    int maxK = atoi(argv[2]);
+    string graphFile = argv[1];
+
     filesystem::remove_all(runtimeFolder);
     filesystem::create_directory(runtimeFolder);
 
-    Sorter s("/home/pizzolato/IR_Project/data/web-NotreDame.txt", runtimeFolder, arcPerBlock);
+    cout << "Begin sorting" << endl;
+    Sorter s(graphFile, runtimeFolder, arcPerBlock);
 
     cout << "Begin writing" << endl;
     string mColFilename = runtimeFolder + string("/mCol.txt");
@@ -362,12 +411,13 @@ int main() {
     nodeId_t *mtColMap = (nodeId_t *) mmap(nullptr, mtRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mtColFile, 0);
     bool *mDanglingMap = (bool *) mmap(nullptr, nNodes*sizeof(bool), PROT_READ, MAP_SHARED, mDanglingFile, 0);
 
-    for(int k = 100; k <= 100; k+=10) {
-        auto pagerankRes = pagerank(k, 0.85, nNodes, mtRowMap, mtColMap, mDanglingMap);
-        auto hitsRes = hits(k, nNodes, mRowMap, mColMap, mtRowMap, mtColMap);
+    cout << "Pagerank" << endl;
+    auto pagerankRes = pagerank(maxK, 0.85, nNodes, mtRowMap, mtColMap, mDanglingMap);
 
-        auto topA = hitsRes.first;
-        auto topH = hitsRes.second;
+    cout << "HITS" << endl;
+    auto hitsRes = hits(maxK, nNodes, mRowMap, mColMap, mtRowMap, mtColMap);
+    auto topA = hitsRes.first;
+    auto topH = hitsRes.second;
 //    cout<< "Top A" << endl;
 //    for(auto i : topA)
 //        cout << i.first << " " << i.second << endl;
@@ -375,19 +425,23 @@ int main() {
 //    for(auto i : topH)
 //        cout << i.first << " " << i.second << endl;
 
-        auto inDegreeRes = inDegree(k, nNodes, mtRowMap);
+    cout << "In degree" << endl;
+    auto inDegreeRes = inDegree(maxK, nNodes, mtRowMap);
 //    cout<< "Top" << endl;
 //    for(auto i : inDegreeRes)
 //        cout << i.first << " " << i.second << endl;
 
-        double jaccPrHt = jaccardIndex(getSetOfFirst(pagerankRes), getSetOfFirst(topA));
-        double jaccPrIn = jaccardIndex(getSetOfFirst(pagerankRes), getSetOfFirst(inDegreeRes));
-        double jaccHtIn = jaccardIndex(getSetOfFirst(topA), getSetOfFirst(inDegreeRes));
-        cout << "------------" << endl;
-        cout << "Jaccard PrHt" << k << ": " << jaccPrHt << endl;
-        cout << "Jaccard PrIn" << k << ": " << jaccPrIn << endl;
-        cout << "Jaccard HtIn" << k << ": " << jaccHtIn << endl;
+    for(int k = 10; k <= maxK; k+=10)
+    {
+        double jaccPrHt = jaccardIndex(getSetOfFirstK(k, pagerankRes), getSetOfFirstK(k, topA));
+        double jaccPrIn = jaccardIndex(getSetOfFirstK(k, pagerankRes), getSetOfFirstK(k, inDegreeRes));
+        double jaccHtIn = jaccardIndex(getSetOfFirstK(k, topA), getSetOfFirstK(k, inDegreeRes));
+        cout << "------- Jaccard K = " << k << " -------" << endl;
+        cout << "PageRank - Hits:      " << jaccPrHt << endl;
+        cout << "PageRank - In Degree: " << jaccPrIn << endl;
+        cout << "Hits     - In Degree: " << jaccHtIn << endl;
     }
+    cout << "-------------------------------" << endl;
 
     close(mRowFile);
     close(mColFile);
