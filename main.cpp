@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <queue>
+#include <chrono>
 #include <set>
 #include <filesystem>
 #include <sys/stat.h>
@@ -16,7 +17,7 @@
 #include "Sorter.h"
 
 #define ull unsigned long long
-#define runtimeFolder "/home/pizzolato/IR_Project/runtime"
+#define runtimeFolder "./runtime"
 #define arcPerBlock 200000
 #define WORKERS 10
 
@@ -27,6 +28,7 @@ nodeId_t writeMatrixFiles(
         bool transposed,
         string const& colFilename,
         string const& rowFilename,
+        string const& valueFilename,
         string const& danglingFilename
         )
 {
@@ -36,6 +38,7 @@ nodeId_t writeMatrixFiles(
     std::fstream colFile, rowFile, valueFile, dangFile;
     colFile.open(colFilename, std::ios::app | std::ios::binary);
     rowFile.open(rowFilename, std::ios::app | std::ios::binary);
+    valueFile.open(valueFilename, std::ios::app | std::ios::binary);
     dangFile.open(danglingFilename, std::ios::app | std::ios::binary);
 
     ull startColInd = 0;
@@ -90,7 +93,10 @@ nodeId_t writeMatrixFiles(
         rowFile.write(reinterpret_cast<char*>(&colInd), sizeof(colInd));
     }
 
+    colFile.close();
     rowFile.close();
+    valueFile.close();
+    dangFile.close();
     return maxId+1; // Row count
 }
 
@@ -312,7 +318,7 @@ pair<vector<pair<nodeId_t, double>>, vector<pair<nodeId_t, double>>> hits(int k,
     return {topA, topH};
 }
 
-vector<pair<nodeId_t, double>> pagerank(int k, double d, nodeId_t nNodes, ull *mtRowMap, nodeId_t *mtColMap, bool *mDanglingMap)
+vector<pair<nodeId_t, double>> pagerank(int k, double d, nodeId_t nNodes, ull *mtRowMap, double *mtValueMap, nodeId_t *mtColMap, bool *mDanglingMap)
 {
     double telep = (1-d)/nNodes;
     string pFilename = runtimeFolder + string("/p_0.txt");
@@ -391,31 +397,45 @@ int main(int argc, char *argv[])
     cout << "Begin writing" << endl;
     string mColFilename = runtimeFolder + string("/mCol.txt");
     string mRowFilename = runtimeFolder + string("/mRow.txt");
+    string mValueFilename = runtimeFolder + string("/mValue.txt");
     string mtColFilename = runtimeFolder + string("/mtCol.txt");
     string mtRowFilename = runtimeFolder + string("/mtRow.txt");
+    string mtValueFilename = runtimeFolder + string("/mtValue.txt");
     string mDanglingFilename = runtimeFolder + string("/mDanglings.txt");
     cout << " - Matrix" << endl;
-    nodeId_t nNodes = writeMatrixFiles(s, false, mColFilename, mRowFilename, mDanglingFilename);
+    nodeId_t nNodes = writeMatrixFiles(s, false, mColFilename, mRowFilename, mValueFilename, mDanglingFilename);
     cout << " - Transposed Matrix" << endl;
-    writeMatrixFiles(s, true, mtColFilename, mtRowFilename, mDanglingFilename);
+    writeMatrixFiles(s, true, mtColFilename, mtRowFilename, mtValueFilename, mDanglingFilename);
 
 
     int mColFile = open(mColFilename.c_str(), O_RDONLY);
     int mRowFile = open(mRowFilename.c_str(), O_RDONLY);
     int mtColFile = open(mtColFilename.c_str(), O_RDONLY);
     int mtRowFile = open(mtRowFilename.c_str(), O_RDONLY);
+    int mtValueFile = open(mtValueFilename.c_str(), O_RDONLY);
     int mDanglingFile = open(mDanglingFilename.c_str(), O_RDONLY);
     ull *mRowMap = (ull *) mmap(nullptr, nNodes*sizeof(ull), PROT_READ, MAP_SHARED, mRowFile, 0);
     nodeId_t *mColMap = (nodeId_t *) mmap(nullptr, mRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mColFile, 0);
     ull *mtRowMap = (ull *) mmap(nullptr, nNodes*sizeof(ull), PROT_READ, MAP_SHARED, mtRowFile, 0);
+    double *mtValueMap = (double *) mmap(nullptr, mtRowMap[nNodes-1]*sizeof(double), PROT_READ, MAP_SHARED, mtValueFile, 0);
     nodeId_t *mtColMap = (nodeId_t *) mmap(nullptr, mtRowMap[nNodes-1]*sizeof(nodeId_t), PROT_READ, MAP_SHARED, mtColFile, 0);
     bool *mDanglingMap = (bool *) mmap(nullptr, nNodes*sizeof(bool), PROT_READ, MAP_SHARED, mDanglingFile, 0);
 
-    cout << "Pagerank" << endl;
-    auto pagerankRes = pagerank(maxK, 0.85, nNodes, mtRowMap, mtColMap, mDanglingMap);
+    cout << "Pagerank ";
+    auto startPR = std::chrono::high_resolution_clock::now();
+    auto pagerankRes = pagerank(maxK, 0.85, nNodes, mtRowMap, mtValueMap, mtColMap, mDanglingMap);
+    auto endPR = std::chrono::high_resolution_clock::now();
+    auto millisPR = std::chrono::duration_cast<std::chrono::milliseconds>(endPR-startPR).count();
+    cout << millisPR << endl;
 
-    cout << "HITS" << endl;
+
+    cout << "HITS ";
+    auto startH = std::chrono::high_resolution_clock::now();
     auto hitsRes = hits(maxK, nNodes, mRowMap, mColMap, mtRowMap, mtColMap);
+    auto endH = std::chrono::high_resolution_clock::now();
+    auto millisH = std::chrono::duration_cast<std::chrono::milliseconds>(endH-startH).count();
+    cout << millisH << endl;
+
     auto topA = hitsRes.first;
     auto topH = hitsRes.second;
 //    cout<< "Top A" << endl;
@@ -425,8 +445,12 @@ int main(int argc, char *argv[])
 //    for(auto i : topH)
 //        cout << i.first << " " << i.second << endl;
 
-    cout << "In degree" << endl;
+    cout << "In degree ";
+    auto startIn = std::chrono::high_resolution_clock::now();
     auto inDegreeRes = inDegree(maxK, nNodes, mtRowMap);
+    auto endIn = std::chrono::high_resolution_clock::now();
+    auto millisIn = std::chrono::duration_cast<std::chrono::milliseconds>(endIn-startIn).count();
+    cout << millisIn << endl;
 //    cout<< "Top" << endl;
 //    for(auto i : inDegreeRes)
 //        cout << i.first << " " << i.second << endl;
@@ -442,6 +466,27 @@ int main(int argc, char *argv[])
         cout << "Hits     - In Degree: " << jaccHtIn << endl;
     }
     cout << "-------------------------------" << endl;
+
+    /*
+    for(int k = 10; k <= maxK; k+=10)
+    {
+        double jaccPrHt = jaccardIndex(getSetOfFirstK(k, pagerankRes), getSetOfFirstK(k, topA));
+        cout << "(" << k << "," << jaccPrHt << ")";
+    }
+    cout << endl;
+    for(int k = 10; k <= maxK; k+=10)
+    {
+        double jaccPrIn = jaccardIndex(getSetOfFirstK(k, pagerankRes), getSetOfFirstK(k, inDegreeRes));
+        cout << "(" << k << "," << jaccPrIn << ")";
+    }
+    cout << endl;
+    for(int k = 10; k <= maxK; k+=10)
+    {
+        double jaccHtIn = jaccardIndex(getSetOfFirstK(k, topA), getSetOfFirstK(k, inDegreeRes));
+        cout << "(" << k << "," << jaccHtIn << ")";
+    }
+    cout << endl;
+    */
 
     close(mRowFile);
     close(mColFile);
